@@ -35,6 +35,11 @@ class RLAgent:
         # State dimensions: 17 simulation features + 14 network features + (n_cells * 12) cell features
         self.state_dim = 17 + 14 + (n_cells * 12)
         self.action_dim = n_cells  # Power ratio for each cell
+
+        # --- Fix: Thêm biến trạng thái trước đó
+        self.last_state = None
+        self.last_action = None
+        self.last_log_prob = None   
         
         # Normalization parameters - learned from data
         self.state_normalizer = StateNormalizer(self.state_dim, n_cells=n_cells)
@@ -129,56 +134,43 @@ class RLAgent:
         """
         state = self.normalize_state(np.array(state).flatten())  # make sure it’s 1D
         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-        
-        with torch.no_grad():
-            action_mean, action_logstd = self.actor(state_tensor)
+
+        action_mean, action_logstd = self.actor(state_tensor)
             
-            if self.training_mode:
-                # Sample from policy during training
+        if self.training_mode:
 
-                # Fix: Giảm tốc độ học 
-                # Giới hạn giá trị hàm log
-                """ action_logstd = torch.clamp(action_logstd, -20, -5)  # σ ∈ [e^-20, e^-5] """
-                # ...Quá nhỏ
-
-                # Tuỳ chỉnh theo quá trình
-                """
-                if (self.episode_steps >= 0) and (self.episode_steps <= 100):
-                    action_logstd = torch.clamp(action_logstd, -5, 0)
-                elif (self.episode_steps > 100) and (self.episode_steps <= 200):
-                    action_logstd = torch.clamp(action_logstd, -7, -1)
-                else:
-                    action_logstd = torch.clamp(action_logstd, -10, -3)
-                """
-                # ...Thời gian đầu biến động quá lớn không cần thiết 
-
-                # Sau mỗi giai đoạn 20 bước tạo biến động một lần
-                
-                if (self.episode_steps % 20) == 0:
-                    action_logstd = torch.clamp(action_logstd, -5, -2)
-                else:
-                    action_logstd = torch.clamp(action_logstd, -10, -4)
-                
+            # Fix: Giới hạn miền xác suất để có xác suất đều
+            action_logstd = torch.clamp(action_logstd, -2, 1)
 
 
-                action_std = torch.exp(action_logstd)
-                dist = torch.distributions.Normal(action_mean, action_std)
-                action = dist.sample()
-                log_prob = dist.log_prob(action).sum(-1)
-            else:
-                # Use mean during evaluation
-                action = action_mean
-                log_prob = torch.zeros(1).to(self.device)
+            # Sample from policy during training
+            action_std = torch.exp(action_logstd)
+            dist = torch.distributions.Normal(action_mean, action_std)
+            action = dist.rsample() # Fix: Cho Gradient chảy qua action
+            log_prob = dist.log_prob(action).sum(-1)
+        else:
+            # Use mean during evaluation
+            action = action_mean
+            log_prob = torch.zeros(1).to(self.device)
         
-        # Clamp actions to [0, 1] range
+        # Clamp actions to [0, 1]
         action = torch.clamp(action, 0.0, 1.0)
+
+        # Fix: Action mới sẽ triển khai trên cơ sở hành động cũ thay vì refresh
+        #      Tạo tỉ số phụ thuộc ratio_p từ 0.8 tiến tới 1
+        #      p = 0.8 + (1 - 1 / x^m) * 0.2 với x là step hiện tại
+        if self.last_action is not None:
+            self.last_action = torch.tensor(self.last_action, dtype=torch.float32, device=self.device)
+            # m = 0.3
+            m = 0.3
+            ratio_p = 0.8 + (1 - 1/pow(self.episode_steps, m))*0.2
+            action = ratio_p * self.last_action + (1 - ratio_p) * action
         
-        # Store for experience replay
-        self.last_state = state_tensor.cpu().numpy().flatten()
-        self.last_action = action.cpu().numpy().flatten()
-        self.last_log_prob = log_prob.cpu().numpy().flatten()
-        
-        return action.cpu().numpy().flatten()
+        # Store for experience replay # Gỡ định dạng tensor của action
+        self.last_state = state_tensor.detach().cpu().numpy().flatten()
+        self.last_action = action.detach().cpu().numpy().flatten()
+        self.last_log_prob = log_prob.detach().cpu().numpy().flatten()
+        return action.detach().cpu().numpy().flatten()
     
     ## OPTIONAL: Modify reward calculation as needed
     def calculate_reward(self, prev_state, action, current_state):
