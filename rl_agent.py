@@ -158,13 +158,19 @@ class RLAgent:
 
         # Fix: Action mới sẽ triển khai trên cơ sở hành động cũ thay vì refresh
         #      Tạo tỉ số phụ thuộc ratio_p từ 0.8 tiến tới 1
-        #      p = 0.8 + (1 - 1 / x^m) * 0.2 với x là step hiện tại
+        #      p = 0.8 + (1 - 1 / x^m) * 0.2 với m là hệ số giảm, x là step hiện tại
         if self.last_action is not None:
-            self.last_action = torch.tensor(self.last_action, dtype=torch.float32, device=self.device)
+            last_action = torch.tensor(self.last_action, dtype=torch.float32, device=self.device)
             # m = 0.3
             m = 0.3
-            ratio_p = 0.8 + (1 - 1/pow(self.episode_steps, m))*0.2
-            action = ratio_p * self.last_action + (1 - ratio_p) * action
+            ratio_p = 0.8 + (1 - 1/pow(self.episode_steps + 1, m))*0.2
+            action = ratio_p * last_action + (1 - ratio_p) * action
+
+        # Fix: Dự đoán kết quả sẽ xảy ra để phòng tránh
+        predict_result = self.calculate_reward(self.last_state, action.detach().cpu().numpy().flatten(), state)
+        if predict_result < 0.0 and self.last_action is not None:
+            action = torch.tensor(self.last_action, dtype=torch.float32, device=self.device)
+            # Action quay trở lại hành động cũ do dự đoán sẽ gây ra kết quả xấu
         
         # Store for experience replay # Gỡ định dạng tensor của action
         self.last_state = state_tensor.detach().cpu().numpy().flatten()
