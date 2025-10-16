@@ -38,7 +38,7 @@ class RLAgent:
 
         # --- Fix: Thêm biến trạng thái trước đó
         self.last_state = None
-        self.last_action = None
+        self.last_action = np.full(self.action_dim, 0.5)  # Initialize with 0.5
         self.last_log_prob = None   
         
         # Normalization parameters - learned from data
@@ -142,11 +142,34 @@ class RLAgent:
             # Fix: Giới hạn miền xác suất để có xác suất đều
             action_logstd = torch.clamp(action_logstd, -2, 1)
 
-
             # Sample from policy during training
             action_std = torch.exp(action_logstd)
             dist = torch.distributions.Normal(action_mean, action_std)
-            action = dist.rsample() # Fix: Cho Gradient chảy qua action
+
+            action = torch.tensor(self.last_action, dtype=torch.float32, device=self.device)
+            # Fix: Thử nghiệm một số hành động và chọn hành động tốt nhất
+            # Chọn số hành động tối đa là 10
+            max_result = 0.0
+            for i in range(10):
+                predict_action = dist.rsample() # Fix: Cho Gradient chảy qua action
+
+                # Fix: Action mới sẽ triển khai trên cơ sở hành động cũ thay vì refresh
+                #      Tạo tỉ số phụ thuộc ratio_p từ 0.8 tiến tới 1
+                #      p = 0.8 + (1 - 1 / x^m) * 0.2 với m là hệ số giảm, x là step hiện tại
+                last_action = torch.tensor(self.last_action, dtype=torch.float32, device=self.device)
+                # m = 0.3
+                m = 0.3
+                ratio_p = 0.8 + (1 - 1/pow(self.episode_steps + 1, m))*0.2
+                predict_action = ratio_p * last_action + (1 - ratio_p) * predict_action
+
+                # Fix: Dự đoán kết quả sẽ xảy ra để phòng tránh
+                predict_result = self.predict_reward(self.last_state, predict_action.detach().cpu().numpy().flatten(), state)
+                if predict_result >= max_result and self.last_action is not None:
+                    max_result = predict_result
+            if max_result > 0.0:
+                action = predict_action
+
+            # Log this action
             log_prob = dist.log_prob(action).sum(-1)
         else:
             # Use mean during evaluation
@@ -155,23 +178,7 @@ class RLAgent:
         
         # Clamp actions to [0, 1]
         action = torch.clamp(action, 0.0, 1.0)
-
-        # Fix: Action mới sẽ triển khai trên cơ sở hành động cũ thay vì refresh
-        #      Tạo tỉ số phụ thuộc ratio_p từ 0.8 tiến tới 1
-        #      p = 0.8 + (1 - 1 / x^m) * 0.2 với m là hệ số giảm, x là step hiện tại
-        if self.last_action is not None:
-            last_action = torch.tensor(self.last_action, dtype=torch.float32, device=self.device)
-            # m = 0.3
-            m = 0.3
-            ratio_p = 0.8 + (1 - 1/pow(self.episode_steps + 1, m))*0.2
-            action = ratio_p * last_action + (1 - ratio_p) * action
-
-        # Fix: Dự đoán kết quả sẽ xảy ra để phòng tránh
-        predict_result = self.calculate_reward(self.last_state, action.detach().cpu().numpy().flatten(), state)
-        if predict_result < 0.0 and self.last_action is not None:
-            action = torch.tensor(self.last_action, dtype=torch.float32, device=self.device)
-            # Action quay trở lại hành động cũ do dự đoán sẽ gây ra kết quả xấu
-        
+  
         # Store for experience replay # Gỡ định dạng tensor của action
         self.last_state = state_tensor.detach().cpu().numpy().flatten()
         self.last_action = action.detach().cpu().numpy().flatten()
@@ -440,3 +447,50 @@ class RLAgent:
             'episode_steps': self.episode_steps,
             'current_episode_reward': self.current_episode_reward
         }
+
+    # Fix: dự đoán kết quả phục vụ cho hành động (giống hàm calculate_reward nhưng không in kết quả)
+    def predict_reward(self, prev_state, action, current_state):
+        if prev_state is None:
+            return 0.0
+        
+        # Convert to numpy arrays for consistent indexing
+        prev_state = np.array(prev_state).flatten()
+        current_state = np.array(current_state).flatten()
+        
+        # Extract state components
+        current_simulation_start = 0
+        current_network_start = 17  # After simulation features
+        
+        # Current state metrics
+        current_energy = current_state[current_network_start + 0]
+        current_connected_ues = current_state[current_simulation_start + 5]
+        current_drop_rate = current_state[current_simulation_start + 11]
+        current_latency = current_state[current_simulation_start + 12]
+        
+        # Previous state metrics for comparison
+        prev_energy = prev_state[current_network_start + 0]
+        prev_connected_ues = prev_state[current_simulation_start + 5]
+        prev_drop_rate = prev_state[current_simulation_start + 11]
+        prev_latency = prev_state[current_simulation_start + 12]
+        
+        # Energy efficiency reward (positive for reduction)
+        energy_change = prev_energy - current_energy
+        energy_reward = energy_change * 0.1  # Reward energy savings
+        
+        # KPI maintenance penalties
+        drop_penalty = max(0, current_drop_rate - 5.0) * -10  # Penalty above 5%
+        latency_penalty = max(0, (current_latency - 50) / 10) * -8  # Penalty above 50ms
+        
+        # Connection stability bonus/penalty
+        connection_change = current_connected_ues - prev_connected_ues
+        connection_reward = connection_change * 0.5  # Small reward for maintaining connections
+        
+        # Performance improvement bonuses
+        drop_improvement = (prev_drop_rate - current_drop_rate) * 2  # Reward drop rate reduction
+        latency_improvement = (prev_latency - current_latency) * 0.1  # Reward latency reduction
+        
+        # Total reward
+        reward = (energy_reward + drop_penalty + latency_penalty + 
+                connection_reward + drop_improvement + latency_improvement)
+        
+        return float(np.clip(reward, -100, 50))
