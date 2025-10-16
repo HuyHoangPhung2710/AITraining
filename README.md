@@ -10,15 +10,11 @@ Phung Huy Hoang
 
 Yêu cầu sử dụng:
 
-Tải các module của python để sử dụng bao gồm
+Tải docker
 
-- torch
-- gymnasium
-- numpy
-- matplotlib
-- moviepy
-- pygame
+Tạo một docker repository
 
-Download qua pip bằng cách gõ trong CommandPrompt
+(Làm theo trong hướng dẫn của docker_Usage)
 
-VD: pip install torch
+Khi thay đổi file -> Sử dụng lệnh docker compose restart energy-simulation
+
